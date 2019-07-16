@@ -1,4 +1,4 @@
-;;; editor/evil/config.el -*- lexical-binding: t; -*-
+;;; feature/evil/config.el -*- lexical-binding: t; -*-
 
 ;; I'm a vimmer at heart. Its modal philosophy suits me better, and this module
 ;; strives to make Emacs a much better vim than vim was.
@@ -7,22 +7,14 @@
   "If non-nil, the o/O keys will continue comment lines if the point is on a
 line with a linewise comment.")
 
-(defvar +evil-preprocessor-regexp "^\\s-*#[a-zA-Z0-9_]"
-  "The regexp used by `+evil/next-preproc-directive' and
-`+evil/previous-preproc-directive' on ]# and [#, to jump between preprocessor
-directives. By default, this only recognizes C directives.")
-
 ;; Set these defaults before `evil'; use `defvar' so they can be changed prior
 ;; to loading.
-(defvar evil-want-C-i-jump (or (daemonp) (display-graphic-p)))
 (defvar evil-want-C-u-scroll t)
 (defvar evil-want-C-w-scroll t)
 (defvar evil-want-Y-yank-to-eol t)
 
 (def-package! evil
-  :hook (doom-init-modules . evil-mode)
-  :demand t
-  :preface
+  :init
   (setq evil-want-visual-char-semi-exclusive t
         evil-magic t
         evil-echo-state t
@@ -35,6 +27,8 @@ directives. By default, this only recognizes C directives.")
         evil-respect-visual-line-mode t
         ;; more vim-like behavior
         evil-symbol-word-search t
+        ;; don't activate mark on shift-click
+        shift-select-mode nil
         ;; cursor appearance
         evil-default-cursor '+evil-default-cursor
         evil-normal-state-cursor 'box
@@ -45,39 +39,34 @@ directives. By default, this only recognizes C directives.")
         evil-want-keybinding (not (featurep! +everywhere)))
 
   :config
+  (load! "+commands")
+
+  (add-hook 'doom-post-init-hook #'evil-mode)
   (evil-select-search-module 'evil-search-module 'evil-search)
 
   (put 'evil-define-key* 'lisp-indent-function 'defun)
 
-  ;; Start help-with-tutorial in emacs state
-  (advice-add #'help-with-tutorial :after (lambda (&rest _) (evil-emacs-state +1)))
-
-  ;; Done in a hook to ensure the popup rules load as late as possible
   (defun +evil|init-popup-rules ()
     (set-popup-rules!
       '(("^\\*evil-registers" :size 0.3)
         ("^\\*Command Line"   :size 8))))
-  (add-hook 'doom-init-modules-hook #'+evil|init-popup-rules)
+  (add-hook 'doom-post-init-hook #'+evil|init-popup-rules)
 
-  ;; Change the cursor color in emacs state. We do it this roundabout way
-  ;; instead of changing `evil-default-cursor' (or `evil-emacs-state-cursor') so
-  ;; it won't interfere with users who have changed these variables.
-  (defvar +evil--default-cursor-color "#ffffff")
-  (defvar +evil--emacs-cursor-color "#ff9999")
+  ;; Change the cursor color in emacs mode
+  (defvar +evil--default-cursor-color
+    (or (ignore-errors (frame-parameter nil 'cursor-color))
+        "#ffffff"))
+
+  (defun +evil-default-cursor () (set-cursor-color +evil--default-cursor-color))
+  (defun +evil-emacs-cursor ()   (set-cursor-color (face-foreground 'warning)))
 
   (defun +evil|update-cursor-color ()
-    (setq +evil--default-cursor-color (face-background 'cursor)
-          +evil--emacs-cursor-color (face-foreground 'warning)))
+    (setq +evil--default-cursor-color (face-background 'cursor)))
   (add-hook 'doom-load-theme-hook #'+evil|update-cursor-color)
-
-  (defun +evil-default-cursor ()
-    (evil-set-cursor-color +evil--default-cursor-color))
-  (defun +evil-emacs-cursor ()
-    (evil-set-cursor-color +evil--emacs-cursor-color))
 
   (defun +evil|update-shift-width ()
     (setq evil-shift-width tab-width))
-  (add-hook 'after-change-major-mode-hook #'+evil|update-shift-width)
+  (add-hook 'after-change-major-mode-hook #'+evil|update-shift-width t)
 
 
   ;; --- keybind fixes ----------------------
@@ -85,6 +74,18 @@ directives. By default, this only recognizes C directives.")
     ;; A wrapper that invokes `wgrep-mark-deletion' across lines you use
     ;; `evil-delete' in wgrep buffers.
     (define-key wgrep-mode-map [remap evil-delete] #'+evil-delete))
+
+  ;; Add vimish-fold, outline-mode & hideshow support to folding commands
+  (define-key! 'global
+    [remap evil-toggle-fold]   #'+evil/fold-toggle
+    [remap evil-close-fold]    #'+evil/fold-close
+    [remap evil-open-fold]     #'+evil/fold-open
+    [remap evil-open-fold-rec] #'+evil/fold-open
+    [remap evil-close-folds]   #'+evil/fold-close-all
+    [remap evil-open-folds]    #'+evil/fold-open-all)
+  (evil-define-key* 'motion 'global
+    "zj" #'+evil/fold-next
+    "zk" #'+evil/fold-previous)
 
   (defun +evil|disable-highlights ()
     "Disable ex search buffer highlights."
@@ -115,28 +116,35 @@ directives. By default, this only recognizes C directives.")
   ;; and one custom one: %:P (expand to the project root).
   (advice-add #'evil-ex-replace-special-filenames :override #'+evil*resolve-vim-path)
 
-  ;; make `try-expand-dabbrev' (from `hippie-expand') work in minibuffer
+  ;; make `try-expand-dabbrev' from `hippie-expand' work in minibuffer. See
+  ;; `he-dabbrev-beg', so we need to redefine syntax for '/'
+  (defun +evil*fix-dabbrev-in-minibuffer ()
+    (set-syntax-table (let* ((table (make-syntax-table)))
+                        (modify-syntax-entry ?/ "." table)
+                        table)))
   (add-hook 'minibuffer-inactive-mode-hook #'+evil*fix-dabbrev-in-minibuffer)
 
   ;; Focus and recenter new splits
   (advice-add #'evil-window-split  :override #'+evil*window-split)
   (advice-add #'evil-window-vsplit :override #'+evil*window-vsplit)
 
+  (defun +evil*set-jump (orig-fn &rest args)
+    "Set a jump point and ensure ORIG-FN doesn't set any new jump points."
+    (evil-set-jump)
+    (let ((evil--jumps-jumping t))
+      (apply orig-fn args)))
+  (advice-add #'counsel-git-grep-action :around #'+evil*set-jump)
+  (advice-add #'helm-ag--find-file-action :around #'+evil*set-jump)
+
   ;; In evil, registers 2-9 are buffer-local. In vim, they're global, so...
+  (defun +evil*make-numbered-markers-global (orig-fn char)
+    (or (and (>= char ?2) (<= char ?9))
+        (funcall orig-fn char)))
   (advice-add #'evil-global-marker-p :around #'+evil*make-numbered-markers-global)
 
   ;; Make o/O continue comments (see `+evil-want-o/O-to-continue-comments')
   (advice-add #'evil-open-above :around #'+evil*insert-newline-above-and-respect-comments)
   (advice-add #'evil-open-below :around #'+evil*insert-newline-below-and-respect-comments)
-
-  ;; Recenter screen after most searches
-  (advice-add! '(evil-visualstar/begin-search-forward
-                 evil-visualstar/begin-search-backward
-                 evil-ex-search-word-backward
-                 evil-ex-search-word-backward
-                 evil-ex-search-forward
-                 evil-ex-search-backward)
-               :after #'doom*recenter)
 
   ;; --- custom interactive codes -----------
   ;; These arg types will highlight matches in the current buffer
@@ -158,24 +166,19 @@ directives. By default, this only recognizes C directives.")
   ;; functions aren't loaded yet.
   (evil-set-command-properties
    '+evil:align :move-point t :ex-arg 'buffer-match :ex-bang t :keep-visual t :suppress-operator t)
+  (evil-set-command-properties
+   '+evil:mc :move-point nil :ex-arg 'global-match :ex-bang t)
 
   ;; `evil-collection'
-  (when (and (featurep! +everywhere)
-             (not doom-reloading-p))
-    (load! "+everywhere"))
-
-  ;; Custom evil ex commands
-  (load! "+commands"))
+  (when (featurep! +everywhere)
+    (load! "+everywhere")))
 
 
 ;;
 ;; Packages
 
 (def-package! evil-commentary
-  :commands (evil-commentary
-             evil-commentary-yank
-             evil-commentary-yank-line
-             evil-commentary-line)
+  :commands (evil-commentary evil-commentary-yank evil-commentary-line)
   :config (evil-commentary-mode 1))
 
 
@@ -195,42 +198,49 @@ directives. By default, this only recognizes C directives.")
 
 
 (def-package! evil-embrace
+  :after evil-surround
   :commands (embrace-add-pair embrace-add-pair-regexp)
   :hook (LaTeX-mode . embrace-LaTeX-mode-hook)
   :hook (org-mode . embrace-org-mode-hook)
-  :hook ((ruby-mode enh-ruby-mode) . embrace-ruby-mode-hook)
-  :hook (emacs-lisp-mode . embrace-emacs-lisp-mode-hook)
-  :hook ((lisp-mode emacs-lisp-mode clojure-mode racket-mode)
-         . +evil|embrace-lisp-mode-hook)
-  :hook ((org-mode LaTeX-mode) . +evil|embrace-latex-mode-hook)
-  :hook ((c++-mode rust-mode rustic-mode csharp-mode java-mode swift-mode typescript-mode)
-         . +evil|embrace-angle-bracket-modes-hook)
   :init
-  (after! evil-surround
-    (evil-embrace-enable-evil-surround-integration))
+  ;; Add extra pairs
+  (add-hook! emacs-lisp-mode
+    (embrace-add-pair ?\` "`" "'"))
+  (add-hook! (emacs-lisp-mode lisp-mode)
+    (embrace-add-pair-regexp ?f "([^ ]+ " ")" #'+evil--embrace-elisp-fn))
+  (add-hook! (org-mode LaTeX-mode)
+    (embrace-add-pair-regexp ?l "\\[a-z]+{" "}" #'+evil--embrace-latex))
   :config
   (setq evil-embrace-show-help-p nil)
+  (evil-embrace-enable-evil-surround-integration)
 
-  (defun +evil|embrace-latex-mode-hook ()
-    (embrace-add-pair-regexp ?l "\\[a-z]+{" "}" #'+evil--embrace-latex))
+  (defun +evil--embrace-get-pair (char)
+    (if-let* ((pair (cdr-safe (assoc (string-to-char char) evil-surround-pairs-alist))))
+        pair
+      (if-let* ((pair (assoc-default char embrace--pairs-list)))
+          (if-let* ((real-pair (and (functionp (embrace-pair-struct-read-function pair))
+                                    (funcall (embrace-pair-struct-read-function pair)))))
+              real-pair
+            (cons (embrace-pair-struct-left pair) (embrace-pair-struct-right pair)))
+        (cons char char))))
 
-  (defun +evil|embrace-lisp-mode-hook ()
-    (push (cons ?f (make-embrace-pair-struct
-                    :key ?f
-                    :read-function #'+evil--embrace-elisp-fn
-                    :left-regexp "([^ ]+ "
-                    :right-regexp ")"))
-          embrace--pairs-list))
+  (defun +evil--embrace-escaped ()
+    "Backslash-escaped surround character support for embrace."
+    (let ((char (read-char "\\")))
+      (if (eq char 27)
+          (cons "" "")
+        (let ((pair (+evil--embrace-get-pair (string char)))
+              (text (if (sp-point-in-string) "\\\\%s" "\\%s")))
+          (cons (format text (car pair))
+                (format text (cdr pair)))))))
 
-  (defun +evil|embrace-angle-bracket-modes-hook ()
-    (set (make-local-variable 'evil-embrace-evil-surround-keys)
-         (delq ?< evil-embrace-evil-surround-keys))
-    (push (cons ?< (make-embrace-pair-struct
-                    :key ?<
-                    :read-function #'+evil--embrace-angle-brackets
-                    :left-regexp "\\[a-z]+<"
-                    :right-regexp ">"))
-          embrace--pairs-list))
+  (defun +evil--embrace-latex ()
+    "LaTeX command support for embrace."
+    (cons (format "\\%s{" (read-string "\\")) "}"))
+
+  (defun +evil--embrace-elisp-fn ()
+    "Elisp function support for embrace."
+    (cons (format "(%s " (or (read-string "(") "")) ")"))
 
   ;; Add escaped-sequence support to embrace
   (setf (alist-get ?\\ (default-value 'embrace--pairs-list))
@@ -242,13 +252,13 @@ directives. By default, this only recognizes C directives.")
 
 
 (def-package! evil-escape
-  :commands (evil-escape)
-  :after-call (evil-normal-state-exit-hook)
+  :commands (evil-escape evil-escape-mode evil-escape-pre-command-hook)
   :init
   (setq evil-escape-excluded-states '(normal visual multiedit emacs motion)
-        evil-escape-excluded-major-modes '(neotree-mode treemacs-mode vterm-mode)
+        evil-escape-excluded-major-modes '(neotree-mode treemacs-mode)
         evil-escape-key-sequence "jk"
         evil-escape-delay 0.25)
+  (add-hook 'pre-command-hook #'evil-escape-pre-command-hook)
   (evil-define-key* '(insert replace visual operator) 'global "\C-g" #'evil-escape)
   :config
   ;; no `evil-escape' in minibuffer
@@ -267,6 +277,29 @@ directives. By default, this only recognizes C directives.")
   (add-hook 'doom-escape-hook #'+evil|escape-exchange))
 
 
+(def-package! evil-numbers
+  :commands (evil-numbers/inc-at-pt evil-numbers/dec-at-pt))
+
+
+(def-package! evil-matchit
+  :commands (evilmi-jump-items global-evil-matchit-mode
+             evilmi-outer-text-object evilmi-inner-text-object)
+  :config (global-evil-matchit-mode 1)
+  :init
+  (global-set-key [remap evil-jump-item] #'evilmi-jump-items)
+  (define-key evil-inner-text-objects-map "%" #'evilmi-inner-text-object)
+  (define-key evil-outer-text-objects-map "%" #'evilmi-outer-text-object)
+  :config
+  ;; Fixes #519 where d% wouldn't leave a dangling end-parenthesis
+  (evil-set-command-properties 'evilmi-jump-items :type 'inclusive :jump t)
+
+  (defun +evil|simple-matchit ()
+    "A hook to force evil-matchit to favor simple bracket jumping. Helpful when
+the new algorithm is confusing, like in python or ruby."
+    (setq-local evilmi-always-simple-jump t))
+  (add-hook 'python-mode-hook #'+evil|simple-matchit))
+
+
 (def-package! evil-snipe
   :commands (evil-snipe-mode evil-snipe-override-mode
              evil-snipe-local-mode evil-snipe-override-local-mode)
@@ -277,7 +310,7 @@ directives. By default, this only recognizes C directives.")
         evil-snipe-repeat-scope 'visible
         evil-snipe-char-fold t)
   :config
-  (pushnew! evil-snipe-disabled-modes 'Info-mode 'calc-mode)
+  (add-to-list 'evil-snipe-disabled-modes 'Info-mode nil #'eq)
   (evil-snipe-mode +1)
   (evil-snipe-override-mode +1))
 
@@ -290,7 +323,25 @@ directives. By default, this only recognizes C directives.")
   :config (global-evil-surround-mode 1))
 
 
-;; Allows you to use the selection for * and #
+(def-package! evil-vimish-fold
+  :commands (evil-vimish-fold/next-fold evil-vimish-fold/previous-fold
+             evil-vimish-fold/delete evil-vimish-fold/delete-all
+             evil-vimish-fold/create evil-vimish-fold/create-line)
+  :init
+  (setq vimish-fold-dir (concat doom-cache-dir "vimish-fold/")
+        vimish-fold-indication-mode 'right-fringe)
+  (evil-define-key* 'motion 'global
+    "zf" #'evil-vimish-fold/create
+    "zF" #'evil-vimish-fold/create-line
+    "zd" #'vimish-fold-delete
+    "zE" #'vimish-fold-delete-all)
+  :config
+  (vimish-fold-global-mode +1))
+
+
+;; Without `evil-visualstar', * and # grab the word at point and search, no
+;; matter what mode you're in. I want to be able to visually select a region and
+;; search for other occurrences of it.
 (def-package! evil-visualstar
   :commands (evil-visualstar/begin-search
              evil-visualstar/begin-search-forward
@@ -306,3 +357,6 @@ directives. By default, this only recognizes C directives.")
 
 (def-package! exato
   :commands (evil-outer-xml-attr evil-inner-xml-attr))
+
+;; I want jj to esc shit
+(setq-default evil-escape-key-sequence "jj")
