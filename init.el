@@ -85,3 +85,8 @@ decrease this. If you experience stuttering, increase this.")
 
 ;; Let 'er rip!
 (require 'core (concat user-emacs-directory "core/core"))
+
+;; I want a decent autocompletion with c++
+(require 'company)
+(setq company-idle-delay 0.2
+      company-minimum-prefix-length 3)
