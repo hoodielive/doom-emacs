@@ -88,5 +88,5 @@ decrease this. If you experience stuttering, increase this.")
 
 ;; I want a decent autocompletion with c++
 (require 'company)
-(setq company-idle-delay 0.2
-      company-minimum-prefix-length 3)
+;;(setq company-idle-delay 0.2
+;;     company-minimum-prefix-length 3)
